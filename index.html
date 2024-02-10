@@ -1,0 +1,237 @@
+<html>
+<head>
+	<title>LittleFS Disk Image Creator</title>
+    <script type="module">
+		import { MemoryBlockDevice, LFS, LFS_O_CREAT, LFS_O_RDONLY, LFS_O_TRUNC, LFS_O_WRONLY } from "./lfs_js.js";
+
+		const fileInput = document.getElementById('file-input');
+		const blockSizeInput = document.getElementById('block-size-input');
+		const blockCountInput = document.getElementById('block-count-input');
+		const maxNameInput = document.getElementById('max-name-input');
+		const UF2FamilyIdInput = document.getElementById('uf2-family-id-input');
+		const UF2FlagsInput = document.getElementById('uf2-flags-input');
+		const UF2AddressInput = document.getElementById('uf2-address-input');
+
+
+		window.applypreset = async function applypreset(block_size, block_count, max_name, uf2_family_id, uf2_flags, uf2_address)
+		{
+		  blockSizeInput.value=block_size;
+		  blockCountInput.value=block_count;
+		  maxNameInput.value=max_name;
+		  UF2FamilyIdInput.value=uf2_family_id;
+		  UF2FlagsInput.value=uf2_flags;
+		  UF2AddressInput.value=uf2_address;
+		}
+
+		window.createimage = async function createimage(type)
+		{
+			var files = fileInput.files;
+			if(files.length < 1)
+			{
+				console.log("no file selected");
+				return;
+			}
+			var block_size = parseInt(blockSizeInput.value);
+			var block_count = parseInt(blockCountInput.value);
+			var max_name = parseInt(maxNameInput.value);
+			if(block_size<104)
+			{
+				alert("Invalid block size!");
+				return;
+			}
+			var bdev = new MemoryBlockDevice(block_size, block_count);
+			var lfs = new LFS(bdev, -1, max_name);
+			console.log("format:", await lfs.format());
+			console.log("mount:", await lfs.mount());
+			for(var i = 0; i< files.length ; i++)
+			{
+				let file = await lfs.open("/"+files[i].name, LFS_O_WRONLY | LFS_O_CREAT | LFS_O_TRUNC);
+				console.log("open:", typeof(file) == "number" ? file : "successed.");
+				let data = new Uint8Array(await files[i].arrayBuffer());
+				let data_size = await file.write(data)
+				console.log("write:", data_size);
+				console.log("tell:", await file.tell());
+				console.log("sync:", await file.sync());
+				if(data_size < 0)
+				{
+				  alert("writing file '"+files[i].name+"' failed with error code '"+data_size+"'");
+				  return;
+				}
+			}
+			console.log("unmount:", await lfs.unmount());
+			if(type=='bin')
+			{
+				file_download('littlefs.bin', dump_bin(bdev))
+			}
+			if(type=='uf2')
+			{
+				file_download('littlefs.uf2', dump_uf2(bdev))
+			}
+		}
+
+		function file_download(name, data)
+		{
+		  var hiddenElement = document.createElement('a');
+		  hiddenElement.href = 'data:application/octet-stream;base64,' + window.btoa(data);
+		  hiddenElement.target = '_blank';
+		  hiddenElement.download = name;
+		  hiddenElement.click();
+		  hiddenElement.remove();
+		}
+
+		function dump_bin(bd)
+		{
+		  var binary = '';
+		  for (var i = 0; i < bd.block_count; i++)
+		  {
+			if(bd._storage[i])
+			{
+				binary += String.fromCharCode.apply(null, bd._storage[i])
+			}
+			else
+			{
+				binary += "\xff".repeat(bd.block_size);
+			}
+		  }
+		  return binary;
+		}
+
+		const uf2_magic_start0 = "\x55\x46\x32\x0A";
+		const uf2_magic_start1 = "\x57\x51\x5D\x9E";
+		const uf2_magic_end = "\x30\x6F\xB1\x0A";
+
+		const start_addr = 0x100ff000;
+
+		function uf2block(data,addr,block,blocknum)
+		{
+		  var uf2block = ''
+		  uf2block += uf2_magic_start0 +uf2_magic_start1 + int32tobytes(parseInt(UF2FlagsInput.value)) + int32tobytes(addr);
+		  uf2block += int32tobytes(data.length) + int32tobytes(block) + int32tobytes(blocknum) + int32tobytes(parseInt(UF2FamilyIdInput.value));
+		  uf2block += data + "\x00".repeat(476-data.length) + uf2_magic_end;
+		  return uf2block;
+		}
+
+		function int32tobytes(num)
+		{
+		  return String.fromCharCode.apply(null, new Uint8Array([num&0xff, (num&0xff00)>>8, (num&0xff0000)>>16, (num&0xff000000)>>24]))
+		}
+
+		function dump_uf2(bd)
+		{
+		  var uf2_blocks_per_block = Math.ceil(bd.block_size/256);
+		  var bdblocknum=0;
+		  var startaddr = parseInt(UF2AddressInput.value);
+		  var ii = 0;
+		  for (var bdblock = 0; bdblock < bd.block_count; bdblock++)
+			if(bd._storage[bdblock])
+			  bdblocknum++;
+		  var uf2_blocks = bdblocknum * uf2_blocks_per_block;
+		  var ii=0;
+		  var uf2data='';
+		  for (var bdblock = 0; bdblock < bd.block_count; bdblock++)
+		  {
+			if(!bd._storage[bdblock]) continue;
+			var addr = startaddr + bdblock*bd.block_size;
+			for(var i = 0 ; i<uf2_blocks_per_block ; i++ )
+			{
+			  var data = String.fromCharCode.apply(null, bd._storage[bdblock].subarray(i*256, (i+1)*256));
+			  uf2data += uf2block(data, addr, (ii*uf2_blocks_per_block)+i, uf2_blocks);
+			  addr += data.length;
+			}
+			ii += 1;
+		  }
+		  return uf2data;
+		}
+    </script>
+    <script>
+		function reboot_to_bootsel()
+		{
+		  const usbVendorId = 0x2E8A;
+		  navigator.serial
+			.requestPort({ filters: [{ usbVendorId }] })
+			.then((port) => {
+			  port.open({ baudRate: 1200 })
+				.then(() => {
+					port.close();
+				})
+				.catch((e) => {
+					alert(`Could open port: ${e}`);
+				});
+			})
+			.catch((e) => {
+			  console.error(e);
+			  if(e.name != "NotFoundError")
+				alert(`Could select port: ${e}`);
+			});
+		}
+    </script>
+</head>
+<body onload="">
+<div>
+	<h1>LittleFS Disk Image Creator</h1>
+	<a href="https://github.com/hurzhurz/littlefs-image-creator">https://github.com/hurzhurz/littlefs-image-creator</a>
+	<p>
+		This is a tool to create a simple LittleFS filesystem image with some files, locally in the browser without uploading them to a server.<br>
+		It is meant to be used with a Raspberry Pi Pico (RP2040), but not limited to it.
+	</p>
+	<p>To use it, simply adjust parameters as needed (or select a preset), select files to include and click the corresponding button to create a .bin or .uf2 file.</p>
+	<p>
+		The UF2 file allows easy flashing to the Raspberry Pi Pico: just press BOOTSEL while connecting via USB (or try the reboot button at the bottom of the page) and copy the file on the appearing drive.<br>
+		If needed, the BIN file can be viewed and verified here: <a href="https://tniessen.github.io/littlefs-disk-img-viewer/" target="_blank">tniessen/littlefs-disk-img-viewer</a>
+	</p>
+</div>
+<div>
+	<h3>Apply Preset</h3>
+	<p>
+		Arduino Raspberry Pi Pico (RP2040):
+		<input type="button" value="1.5MB FS" onclick="applypreset(4096, 384, 32, '0xE48BFF56', '0x00002000', '0x1007f000')">
+		<input type="button" value="1MB FS" onclick="applypreset(4096, 256, 32, '0xE48BFF56', '0x00002000', '0x100ff000')">
+		<input type="button" value="512KB FS" onclick="applypreset(4096, 128, 32, '0xE48BFF56', '0x00002000', '0x1017f000')">
+		<input type="button" value="256KB FS" onclick="applypreset(4096, 64, 32, '0xE48BFF56', '0x00002000', '0x101bf000')">
+		<input type="button" value="128KB FS" onclick="applypreset(4096, 32, 32, '0xE48BFF56', '0x00002000', '0x101df000')">
+		<input type="button" value="64KB FS" onclick="applypreset(4096, 16, 32, '0xE48BFF56', '0x00002000', '0x101ef000')">
+	</p>
+</div>
+	<h3>LFS settings</h3>
+	<p>
+		<label for="block-size-input">Block size:</label>
+		<input type="number" id="block-size-input" value="4096">
+		<label for="block-count-input">Block count:</label>
+		<input type="number" id="block-count-input" value="256">
+		<label for="max-name-input">Max Filename Length:</label>
+		<input type="number" id="max-name-input" value="32">
+	</p>
+</div>
+<div>
+	<h3>UF2 settings</h3>
+	<p>
+		<label for="uf2-family-id-input">Family ID:</label>
+		<input type="text" id="uf2-family-id-input" value="0xE48BFF56">
+		<label for="uf2-flags-input">Flags:</label>
+		<input type="text" id="uf2-flags-input" value="0x00002000">
+		<label for="uf2-address-input">Start Address:</label>
+		<input type="text" id="uf2-address-input" value="0x100ff000">
+	</p>
+</div>
+<div>
+	<h3>Files</h3>
+	<p>
+		<label for="file-input">Files to include</label>
+		<input type="file" id="file-input" multiple>
+	</p>
+</div>
+<div>
+	<h3>Create Image</h3>
+	<p>
+		<input type="button" value="Create BIN file" onclick="createimage('bin')">
+		<input type="button" value="Create UF2 file" onclick="createimage('uf2')">
+	</p>
+</div>
+<div>
+	<p>
+		<input type="button" value="Reboot Raspberry Pi Pico to BOOTSEL mode via serial" onclick="reboot_to_bootsel()">
+	</p>
+</div>
+
+</body>
+</html>
